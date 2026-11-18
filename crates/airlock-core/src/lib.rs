@@ -11,6 +11,7 @@ pub mod freeze;
 pub mod gateway;
 pub mod limits;
 pub mod policy;
+pub mod signing;
 pub mod taint;
 pub mod util;
 
