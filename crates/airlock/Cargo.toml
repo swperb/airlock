@@ -1,0 +1,25 @@
+[package]
+name = "airlock"
+description = "MCP gateway that deterministically limits what AI agents can do"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "airlock"
+path = "src/main.rs"
+
+[dependencies]
+airlock-core = { path = "../airlock-core" }
+serde_json.workspace = true
+clap.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

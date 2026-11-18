@@ -1,0 +1,52 @@
+# airlock demo policy. The gateway fronts three MCP servers for a
+# "support-triage" task: read the database, send mail to example.com, and
+# fetch web pages (which are untrusted).
+
+[gateway]
+state_dir = "../.run/state"
+min_taint_len = 8
+approval_ttl_secs = 600
+
+[audit]
+path = "audit.jsonl"
+redact = ["password", "token"]
+
+[[upstream]]
+name = "db"
+command = ["demo/.run/bin/db-server"]
+
+[[upstream]]
+name = "mail"
+command = ["demo/.run/bin/mail-server"]
+
+[[upstream]]
+name = "web"
+command = ["demo/.run/bin/web-server"]
+provenance = "untrusted"        # everything the web server returns is untrusted
+
+[[tool]]
+name = "db.query"
+class = "read"
+
+[[tool]]
+name = "db.execute"
+class = "destructive"
+deny_patterns = ["(?i)\\bdrop\\b", "(?i)\\btruncate\\b"]   # refused outright
+
+[[tool]]
+name = "mail.send"
+class = "irreversible_external"
+
+[[tool]]
+name = "web.fetch"
+class = "read"
+
+[[grant]]
+task = "support-triage"
+expires = "2099-01-01T00:00:00Z"
+tools = ["db.query", "db.execute", "mail.send", "web.fetch"]
+[grant.limits]
+"mail.send".to_domains = ["example.com"]     # mail may only go to example.com
+[grant.budget]
+"mail.send" = { per_hour = 20 }
+"db.query"  = { per_hour = 500 }

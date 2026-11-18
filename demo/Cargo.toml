@@ -1,0 +1,20 @@
+[package]
+name = "airlock-demo"
+description = "Prompt-injection demo for airlock: fake MCP servers and a scripted hijacked agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+airlock = { path = "../crates/airlock" }
+serde_json.workspace = true
+rusqlite.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+airlock-core = { path = "../crates/airlock-core" }
+
+[lints]
+workspace = true

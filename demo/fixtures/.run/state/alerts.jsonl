@@ -1,0 +1,2 @@
+{"approval_id":null,"kind":"blocked","reason":"argument /sql matches deny pattern \"(?i)\\\\bdrop\\\\b\" for db.execute (denied even with approval)","session":"demo","task":"support-triage","tool":"db.execute","ts":"2026-11-18T13:46:28Z"}
+{"approval_id":null,"kind":"blocked","reason":"limit violated: argument \"to\" domain \"attacker.example\" is not in to_domains [\"example.com\"]","session":"demo","task":"support-triage","tool":"mail.send","ts":"2026-11-18T13:46:28Z"}
