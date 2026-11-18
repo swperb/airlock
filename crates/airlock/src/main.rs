@@ -25,6 +25,8 @@ struct Cli {
 enum Cmd {
     /// Run the gateway for one task, proxying MCP stdio.
     Run(RunArgs),
+    /// Serve the gateway for one task over MCP streamable HTTP.
+    Serve(ServeArgs),
     /// Check that a policy file is valid.
     Policy {
         #[command(subcommand)]
@@ -57,6 +59,29 @@ struct RunArgs {
     /// Session id (defaults to a timestamp-based id).
     #[arg(long)]
     session: Option<String>,
+}
+
+#[derive(Args)]
+struct ServeArgs {
+    #[arg(long)]
+    policy: PathBuf,
+    /// The task whose grant applies to every session on this listener.
+    #[arg(long)]
+    task: String,
+    /// Address to listen on. Non-loopback addresses require AIRLOCK_HTTP_TOKEN.
+    #[arg(long, default_value = "127.0.0.1:8787")]
+    listen: String,
+    /// Allow browser requests from this Origin (repeatable). By default any
+    /// request carrying an Origin header is refused.
+    #[arg(long = "allow-origin")]
+    allow_origin: Vec<String>,
+    #[arg(long, default_value_t = 8)]
+    workers: usize,
+    #[arg(long, default_value_t = 256)]
+    max_sessions: usize,
+    /// End sessions idle for this many seconds.
+    #[arg(long, default_value_t = 3600)]
+    idle_timeout_secs: u64,
 }
 
 #[derive(Subcommand)]
@@ -125,6 +150,7 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     match cli.cmd {
         Cmd::Run(a) => cmd_run(a),
+        Cmd::Serve(a) => cmd_serve(a),
         Cmd::Policy {
             what: PolicyCmd::Check { policy },
         } => cmd_policy_check(&policy),
@@ -161,6 +187,32 @@ impl StateArgs {
 
 fn cmd_run(a: RunArgs) -> Result<ExitCode, Box<dyn std::error::Error>> {
     airlock::run_gateway(&a.policy, &a.task, a.session)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_serve(a: ServeArgs) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let mut cfg = airlock::http::HttpConfig::new(&a.listen);
+    // The token comes from the environment, never the command line, so it
+    // does not show up in process listings or shell history.
+    cfg.token = std::env::var("AIRLOCK_HTTP_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty());
+    cfg.allowed_origins = a.allow_origin;
+    cfg.workers = a.workers;
+    cfg.max_sessions = a.max_sessions;
+    cfg.idle_timeout = std::time::Duration::from_secs(a.idle_timeout_secs.max(1));
+    let auth = if cfg.token.is_some() {
+        "bearer token required"
+    } else {
+        "no token (loopback only)"
+    };
+    let server = airlock::serve_http(&a.policy, &a.task, cfg)?;
+    eprintln!(
+        "airlock: serving task {:?} on {} ({auth})",
+        a.task,
+        server.url()
+    );
+    server.join();
     Ok(ExitCode::SUCCESS)
 }
 

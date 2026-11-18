@@ -2,7 +2,8 @@
 //! instructions it reads in tool output, which is exactly the behaviour a
 //! prompt injection relies on. This stands in for a fully compromised agent.
 //!
-//! It talks to one MCP endpoint, given as the command after `--`. The same
+//! It talks to one MCP endpoint: a command after `--` (stdio), or a URL
+//! after `--http` (streamable HTTP). The same
 //! script runs against the passthrough (no protection) and against airlock.
 //! It prints a step log and a final JSON summary to stdout.
 
@@ -11,17 +12,28 @@ use serde_json::json;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let Some(sep) = args.iter().position(|a| a == "--") else {
-        eprintln!("usage: agent -- <mcp endpoint command...>");
-        std::process::exit(2);
+    let mut client = if args.get(1).map(String::as_str) == Some("--http") {
+        // Streamable HTTP: `agent --http <url>`, token from AIRLOCK_HTTP_TOKEN.
+        let Some(url) = args.get(2) else {
+            eprintln!("usage: agent --http <url>");
+            std::process::exit(2);
+        };
+        let token = std::env::var("AIRLOCK_HTTP_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty());
+        Client::http(url, token).expect("connect to endpoint")
+    } else {
+        let Some(sep) = args.iter().position(|a| a == "--") else {
+            eprintln!("usage: agent -- <mcp endpoint command...> | agent --http <url>");
+            std::process::exit(2);
+        };
+        let cmd = &args[sep + 1..];
+        if cmd.is_empty() {
+            eprintln!("no endpoint command given");
+            std::process::exit(2);
+        }
+        Client::spawn(cmd).expect("connect to endpoint")
     };
-    let cmd = &args[sep + 1..];
-    if cmd.is_empty() {
-        eprintln!("no endpoint command given");
-        std::process::exit(2);
-    }
-
-    let mut client = Client::spawn(cmd).expect("connect to endpoint");
     let mut steps = Vec::new();
     let mut step = |client: &mut Client, label: &str, tool: &str, args: serde_json::Value| {
         let (is_err, text) = client

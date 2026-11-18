@@ -11,6 +11,7 @@
 //! Nothing on it can approve, reject, unfreeze or change policy.
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde_json::{json, Value};
 
@@ -85,18 +86,40 @@ pub struct Evaluation {
     pub tripped: bool,
 }
 
+/// Per-task state shared by every session of that task in one gateway
+/// process: the record of untrusted output and the budgets.
+///
+/// Sharing matters for the HTTP transport, where one agent can open many MCP
+/// sessions. If each session had its own budgets, a hijacked agent could reset
+/// its budget by opening a new session; if each had its own taint record, it
+/// could read untrusted content in one session and act in another.
+#[derive(Debug)]
+pub struct TaskState {
+    pub taint: TaintStore,
+    pub budgets: Budgets,
+}
+
+impl TaskState {
+    /// Fresh shared state for a policy.
+    pub fn shared(policy: &Policy) -> Arc<Mutex<TaskState>> {
+        Arc::new(Mutex::new(TaskState {
+            taint: TaintStore::new(policy.gateway.min_taint_len),
+            budgets: Budgets::new(),
+        }))
+    }
+}
+
 pub struct Gateway<U: Upstreams> {
     policy: Policy,
     task: String,
     session: String,
     upstreams: U,
-    taint: TaintStore,
-    budgets: Budgets,
+    state: Arc<Mutex<TaskState>>,
     audit: AuditLog,
     approvals: ApprovalStore,
     state_dir: PathBuf,
-    notifier: Box<dyn Notifier>,
-    clock: Box<dyn Fn() -> i64>,
+    notifier: Box<dyn Notifier + Send>,
+    clock: Box<dyn Fn() -> i64 + Send>,
 }
 
 impl<U: Upstreams> Gateway<U> {
@@ -107,7 +130,21 @@ impl<U: Upstreams> Gateway<U> {
         task: &str,
         session: &str,
         upstreams: U,
-        notifier: Box<dyn Notifier>,
+        notifier: Box<dyn Notifier + Send>,
+    ) -> Result<Self, Error> {
+        let state = TaskState::shared(&policy);
+        Gateway::with_shared_state(policy, task, session, upstreams, notifier, state)
+    }
+
+    /// Like [`Gateway::new`], but sharing taint and budget state with other
+    /// sessions of the same task (see [`TaskState`]).
+    pub fn with_shared_state(
+        policy: Policy,
+        task: &str,
+        session: &str,
+        upstreams: U,
+        notifier: Box<dyn Notifier + Send>,
+        state: Arc<Mutex<TaskState>>,
     ) -> Result<Self, Error> {
         if !policy.grants.contains_key(task) {
             return Err(Error::Policy(format!("no grant for task {task:?}")));
@@ -116,11 +153,10 @@ impl<U: Upstreams> Gateway<U> {
         std::fs::create_dir_all(&state_dir)?;
         let audit = AuditLog::open(&policy.audit_path())?;
         let gw = Gateway {
-            taint: TaintStore::new(policy.gateway.min_taint_len),
+            state,
             approvals: ApprovalStore::new(&state_dir),
             task: task.to_string(),
             session: session.to_string(),
-            budgets: Budgets::new(),
             policy,
             upstreams,
             audit,
@@ -140,9 +176,16 @@ impl<U: Upstreams> Gateway<U> {
     }
 
     /// Replace the clock (tests).
-    pub fn with_clock(mut self, clock: impl Fn() -> i64 + 'static) -> Self {
+    pub fn with_clock(mut self, clock: impl Fn() -> i64 + Send + 'static) -> Self {
         self.clock = Box::new(clock);
         self
+    }
+
+    /// Lock the shared task state. A poisoned lock (a panic mid-update in
+    /// another session) still yields the data: budgets and taint only ever
+    /// grow, so a partial update errs on the side of more restriction.
+    fn task_state(&self) -> MutexGuard<'_, TaskState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     pub fn session(&self) -> &str {
@@ -371,7 +414,7 @@ impl<U: Upstreams> Gateway<U> {
                 {
                     Ok(mut result) => {
                         if provenance == Provenance::Untrusted {
-                            self.taint.record(&result);
+                            self.task_state().taint.record(&result);
                         }
                         label(&mut result, provenance);
                         result
@@ -469,7 +512,7 @@ impl<U: Upstreams> Gateway<U> {
         }
 
         // 3. Provenance.
-        let tainted = self.taint.tainted_paths(args);
+        let tainted = self.task_state().taint.tainted_paths(args);
 
         // A budget unit is charged once per logical action. For reads and
         // reversible writes that is each call. For destructive/external calls
@@ -480,7 +523,7 @@ impl<U: Upstreams> Gateway<U> {
 
         if !tool.class.is_high_risk() {
             if let Some(per_hour) = per_hour {
-                match self.budgets.consume(name, per_hour, now) {
+                match self.task_state().budgets.consume(name, per_hour, now) {
                     BudgetCheck::Ok => {}
                     BudgetCheck::JustTripped(r) => {
                         return Evaluation {
@@ -562,7 +605,7 @@ impl<U: Upstreams> Gateway<U> {
 
         // 5. A fresh high-risk attempt: charge budget now, then open a hold.
         if let Some(per_hour) = per_hour {
-            match self.budgets.consume(name, per_hour, now) {
+            match self.task_state().budgets.consume(name, per_hour, now) {
                 BudgetCheck::Ok => {}
                 BudgetCheck::JustTripped(r) => {
                     return Evaluation {
