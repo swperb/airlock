@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 use crate::approvals::{args_hash, ApprovalStore, Pending, Status};
 use crate::audit::{AuditLog, Record};
-use crate::budget::{BudgetCheck, Budgets};
+use crate::budget::{BudgetCheck, BudgetStore};
 use crate::freeze;
 use crate::limits::{check_deny_patterns, check_limit};
 use crate::policy::{Class, Policy, Provenance};
@@ -87,24 +87,26 @@ pub struct Evaluation {
 }
 
 /// Per-task state shared by every session of that task in one gateway
-/// process: the record of untrusted output and the budgets.
+/// process: the record of untrusted output, and the handle to the task's
+/// budgets.
 ///
 /// Sharing matters for the HTTP transport, where one agent can open many MCP
-/// sessions. If each session had its own budgets, a hijacked agent could reset
-/// its budget by opening a new session; if each had its own taint record, it
-/// could read untrusted content in one session and act in another.
+/// sessions. If each session had its own taint record, it could read untrusted
+/// content in one session and act in another. Budgets go further: they are
+/// persisted in the state directory (see [`crate::budget`]), so neither a new
+/// session nor a gateway restart resets them.
 #[derive(Debug)]
 pub struct TaskState {
     pub taint: TaintStore,
-    pub budgets: Budgets,
+    pub budgets: BudgetStore,
 }
 
 impl TaskState {
-    /// Fresh shared state for a policy.
-    pub fn shared(policy: &Policy) -> Arc<Mutex<TaskState>> {
+    /// Shared state for one task under a policy.
+    pub fn shared(policy: &Policy, task: &str) -> Arc<Mutex<TaskState>> {
         Arc::new(Mutex::new(TaskState {
             taint: TaintStore::new(policy.gateway.min_taint_len),
-            budgets: Budgets::new(),
+            budgets: BudgetStore::new(&policy.state_dir(), task),
         }))
     }
 }
@@ -132,7 +134,7 @@ impl<U: Upstreams> Gateway<U> {
         upstreams: U,
         notifier: Box<dyn Notifier + Send>,
     ) -> Result<Self, Error> {
-        let state = TaskState::shared(&policy);
+        let state = TaskState::shared(&policy, task);
         Gateway::with_shared_state(policy, task, session, upstreams, notifier, state)
     }
 
@@ -523,9 +525,22 @@ impl<U: Upstreams> Gateway<U> {
 
         if !tool.class.is_high_risk() {
             if let Some(per_hour) = per_hour {
-                match self.task_state().budgets.consume(name, per_hour, now) {
-                    BudgetCheck::Ok => {}
-                    BudgetCheck::JustTripped(r) => {
+                let charged = self.task_state().budgets.consume(name, per_hour, now);
+                match charged {
+                    // The budget store is unreadable: reads fail open (and are
+                    // logged as such); reversible writes fail closed.
+                    Err(e) if tool.class == Class::Read => {
+                        fail_open = Some(format!("budget store unavailable: {e}"));
+                    }
+                    Err(e) => {
+                        return deny(
+                            class,
+                            format!("budget store unavailable, writes fail closed: {e}"),
+                            tainted,
+                        )
+                    }
+                    Ok(BudgetCheck::Ok) => {}
+                    Ok(BudgetCheck::JustTripped(r)) => {
                         return Evaluation {
                             class,
                             verdict: Verdict::Deny { reason: r },
@@ -533,7 +548,7 @@ impl<U: Upstreams> Gateway<U> {
                             tripped: true,
                         };
                     }
-                    BudgetCheck::Tripped(r) => return deny(class, r, tainted),
+                    Ok(BudgetCheck::Tripped(r)) => return deny(class, r, tainted),
                 }
             }
             return Evaluation {
@@ -605,9 +620,17 @@ impl<U: Upstreams> Gateway<U> {
 
         // 5. A fresh high-risk attempt: charge budget now, then open a hold.
         if let Some(per_hour) = per_hour {
-            match self.task_state().budgets.consume(name, per_hour, now) {
-                BudgetCheck::Ok => {}
-                BudgetCheck::JustTripped(r) => {
+            let charged = self.task_state().budgets.consume(name, per_hour, now);
+            match charged {
+                Err(e) => {
+                    return deny(
+                        class,
+                        format!("budget store unavailable, fails closed: {e}"),
+                        tainted,
+                    )
+                }
+                Ok(BudgetCheck::Ok) => {}
+                Ok(BudgetCheck::JustTripped(r)) => {
                     return Evaluation {
                         class,
                         verdict: Verdict::Deny { reason: r },
@@ -615,7 +638,7 @@ impl<U: Upstreams> Gateway<U> {
                         tripped: true,
                     };
                 }
-                BudgetCheck::Tripped(r) => return deny(class, r, tainted),
+                Ok(BudgetCheck::Tripped(r)) => return deny(class, r, tainted),
             }
         }
 

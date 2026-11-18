@@ -159,7 +159,23 @@ For every `tools/call`, in order:
 Budgets are charged once per logical action (each read/reversible call; the
 first attempt of a destructive/external call, not the approved retry). When a
 tool exceeds its hourly budget the circuit breaker trips and that tool stays
-refused for the rest of the session.
+refused until a person resets it.
+
+Budgets persist in `<state_dir>/budgets/`, one file per task, updated under a
+file lock on every charge. Restarting the gateway does not reset a budget or
+close a breaker, and several gateway processes serving the same task share one
+budget. If the budget store cannot be read, reads are allowed (logged as
+`allowed_fail_open`) and writes are refused; a corrupt file is never silently
+treated as an empty budget.
+
+```bash
+airlock budget status --state-dir .airlock
+airlock budget reset  --task support-triage --tool mail.send --by alice --state-dir .airlock
+```
+
+`budget reset` closes the breaker and clears the window for that tool (or for
+every tool of the task without `--tool`), and is recorded in the audit log.
+Like approvals, it is out-of-band: nothing on the MCP connection can do it.
 
 **Fail-open / fail-closed by class.** If airlock cannot evaluate a policy (a
 state file is unreadable, the audit log cannot be written), reads are allowed
@@ -304,8 +320,10 @@ How the HTTP listener is hardened:
   proxy in front, for anything that crosses a network.
 
 Approvals are bound to the MCP session that asked, so the approved retry must
-arrive on the same session. Budgets and taint live in the gateway process: a
-restart resets them, so run the gateway as a service the agent cannot restart.
+arrive on the same session. Budgets persist across restarts; the record of
+untrusted output lives in the gateway process, so a restart forgets it. That
+only removes the extra "derived from untrusted content" reason: destructive
+and external calls need a person either way.
 
 ## The demo
 
@@ -343,6 +361,10 @@ infrastructure in this repository, and none is needed.
   two-person rule, refund-laundering via an untrusted ticket) is expressed as
   **policy fixtures**: the cases check that the policy can state the rule and
   the engine enforces it the same way every time.
+- `crates/airlock-core/tests/budgets.rs` and `crates/airlock/tests/budget_cli.rs`:
+  budgets and breakers surviving restarts, shared across processes, failing
+  open for reads and closed for writes when the store is unreadable, and
+  `airlock budget reset`.
 - `crates/airlock/tests/signing_cli.rs`: key generation, signing, verification,
   and the gateway refusing unsigned, altered, untrusted or replayed policies.
 - `crates/airlock/tests/http.rs`: the streamable HTTP listener (session
@@ -370,8 +392,8 @@ Left as clear extension points, intentionally unbuilt in this version:
 - **TLS and server-initiated messages on the HTTP transport**: terminate TLS
   at a reverse proxy; requests an upstream sends back to the client (sampling,
   elicitation) are not relayed.
-- **Persistent budgets**: budgets and the untrusted-output record are kept in
-  memory per gateway process.
+- **Persistent provenance**: the record of untrusted output is kept in memory
+  per gateway process (budgets do persist).
 - **Hosted service, web UI, multi-tenant management.**
 - **Threshold signing**: a policy needs one trusted key's signature, not k of n.
 

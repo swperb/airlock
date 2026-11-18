@@ -97,7 +97,7 @@ pub fn serve_http(
     if !policy.grants.contains_key(task) {
         return Err(format!("no grant for task {task:?}").into());
     }
-    let state = TaskState::shared(&policy);
+    let state = TaskState::shared(&policy, task);
     let task = task.to_string();
     let factory = move |sid: &str| {
         let upstreams = upstream::PolicyUpstreams::from_policy(&policy);
