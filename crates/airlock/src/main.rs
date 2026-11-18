@@ -57,6 +57,32 @@ enum Cmd {
         #[command(subcommand)]
         what: AuditCmd,
     },
+    /// Show or reset budgets and circuit breakers.
+    Budget {
+        #[command(subcommand)]
+        what: BudgetCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum BudgetCmd {
+    /// Show each task's budget use in the last hour and any open breakers.
+    Status(StateArgs),
+    /// Close a tripped circuit breaker and clear its window (out-of-band;
+    /// the agent cannot do this). Recorded in the audit log.
+    Reset {
+        /// Task whose budget to reset.
+        #[arg(long)]
+        task: String,
+        /// Only this tool (e.g. mail.send); default is every tool of the task.
+        #[arg(long)]
+        tool: Option<String>,
+        /// Name of the person resetting it.
+        #[arg(long)]
+        by: String,
+        #[command(flatten)]
+        state: StateArgs,
+    },
 }
 
 /// Policy signature enforcement. When a trusted-keys file is given, the
@@ -222,6 +248,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Cmd::Freeze(a) => cmd_freeze(a),
         Cmd::Unfreeze(s) => cmd_unfreeze(&s),
         Cmd::Audit { what } => cmd_audit(what),
+        Cmd::Budget { what } => cmd_budget(what),
     }
 }
 
@@ -563,6 +590,66 @@ fn cmd_unfreeze(s: &StateArgs) -> Result<ExitCode, Box<dyn std::error::Error>> {
         println!("was not frozen.");
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_budget(what: BudgetCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    use airlock_core::budget::{self, BudgetStore};
+    match what {
+        BudgetCmd::Status(state) => {
+            let now = now_unix();
+            let tasks = budget::list(&state.state_dir()?, now)?;
+            if tasks.is_empty() {
+                println!("no budget use recorded.");
+            }
+            for (task, tools) in tasks {
+                println!("task {task:?}");
+                for t in tools {
+                    match t.tripped_at {
+                        Some(at) => println!(
+                            "  {:<28} {:>5} in the last hour  BREAKER OPEN since {}",
+                            t.tool,
+                            t.used_last_hour,
+                            airlock_core::util::rfc3339(at)
+                        ),
+                        None => {
+                            println!("  {:<28} {:>5} in the last hour", t.tool, t.used_last_hour)
+                        }
+                    }
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        BudgetCmd::Reset {
+            task,
+            tool,
+            by,
+            state,
+        } => {
+            if by.trim().is_empty() {
+                return Err("--by must name the person resetting the budget".into());
+            }
+            let store = BudgetStore::new(&state.state_dir()?, &task);
+            let reset = store.reset(tool.as_deref())?;
+            if reset.is_empty() {
+                println!(
+                    "nothing to reset for task {task:?}{}.",
+                    tool.map(|t| format!(", tool {t}")).unwrap_or_default()
+                );
+                return Ok(ExitCode::SUCCESS);
+            }
+            audit::AuditLog::open(&state.audit_path()?)?.append(audit::Record {
+                task: task.clone(),
+                event: "budget_reset".into(),
+                tool: tool.clone(),
+                decision: "info".into(),
+                reason: format!("budget and breaker reset by {by} for {}", reset.join(", ")),
+                args: serde_json::json!({"tools": reset, "by": by}),
+                ..Default::default()
+            })?;
+            println!("reset {} for task {task:?}.", reset.join(", "));
+            Ok(ExitCode::SUCCESS)
+        }
+    }
 }
 
 fn cmd_audit(what: AuditCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
