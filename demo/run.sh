@@ -47,7 +47,7 @@ reset_world() {
 
 echo
 rule
-bold "RUN 1 — WITHOUT airlock (agent talks straight to the tools)"
+bold "RUN 1: WITHOUT airlock (agent talks straight to the tools)"
 rule
 reset_world
 echo "customers table before: $(customers_count)"
@@ -64,7 +64,7 @@ fi
 
 echo
 rule
-bold "RUN 2 — WITH airlock (same agent, same injection)"
+bold "RUN 2: WITH airlock (same agent, same injection)"
 rule
 reset_world
 echo "customers table before: $(customers_count)"
@@ -77,7 +77,7 @@ if [ -s "$AIRLOCK_DEMO_MAIL" ]; then
   bold "outbox.txt (mail that was 'sent'):"
   sed 's/^/    /' "$AIRLOCK_DEMO_MAIL"
 else
-  echo "outbox.txt: (empty — nothing was exfiltrated)"
+  echo "outbox.txt: (empty, nothing was exfiltrated)"
 fi
 
 echo
