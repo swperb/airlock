@@ -11,6 +11,7 @@ publish = false
 airlock = { path = "../crates/airlock" }
 serde_json.workspace = true
 rusqlite.workspace = true
+ureq.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

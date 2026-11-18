@@ -146,12 +146,23 @@ pub struct AuditConfig {
     pub redact: Vec<String>,
 }
 
-/// `[[upstream]]` entry: an MCP server the gateway fronts.
+/// `[[upstream]]` entry: an MCP server the gateway fronts. Exactly one of
+/// `command` (a local server spoken to over stdio) or `url` (a remote server
+/// spoken to over MCP streamable HTTP) must be set.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpstreamConfig {
     pub name: String,
-    pub command: Vec<String>,
+    #[serde(default)]
+    pub command: Option<Vec<String>>,
+    /// `http://` or `https://` endpoint of a streamable HTTP MCP server.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Name of an environment variable (in the gateway's environment) holding
+    /// a bearer token for a `url` upstream. The token itself never appears in
+    /// the policy file and is never shown to the agent.
+    #[serde(default)]
+    pub bearer_token_env: Option<String>,
     /// Label applied to everything this server returns. Default `internal`.
     #[serde(default)]
     pub provenance: Provenance,
@@ -327,8 +338,52 @@ fn compile(raw: RawPolicy, base_dir: PathBuf) -> Result<Policy, Error> {
         if !upstream_names.insert(u.name.clone()) {
             return Err(err(format!("duplicate upstream {:?}", u.name)));
         }
-        if u.command.is_empty() {
-            return Err(err(format!("upstream {:?} has an empty command", u.name)));
+        match (&u.command, &u.url) {
+            (Some(cmd), None) => {
+                if cmd.is_empty() || cmd[0].is_empty() {
+                    return Err(err(format!("upstream {:?} has an empty command", u.name)));
+                }
+                if u.bearer_token_env.is_some() {
+                    return Err(err(format!(
+                        "upstream {:?}: bearer_token_env only applies to url upstreams; pass stdio credentials with env",
+                        u.name
+                    )));
+                }
+            }
+            (None, Some(url)) => {
+                if !(url.starts_with("http://") || url.starts_with("https://")) {
+                    return Err(err(format!(
+                        "upstream {:?}: url must start with http:// or https:// (got {url:?})",
+                        u.name
+                    )));
+                }
+                if !u.env.is_empty() {
+                    return Err(err(format!(
+                        "upstream {:?}: env only applies to command upstreams; use bearer_token_env for url upstreams",
+                        u.name
+                    )));
+                }
+                if let Some(var) = &u.bearer_token_env {
+                    if var.is_empty() {
+                        return Err(err(format!(
+                            "upstream {:?}: bearer_token_env is empty",
+                            u.name
+                        )));
+                    }
+                }
+            }
+            (Some(_), Some(_)) => {
+                return Err(err(format!(
+                    "upstream {:?} sets both command and url; set exactly one",
+                    u.name
+                )));
+            }
+            (None, None) => {
+                return Err(err(format!(
+                    "upstream {:?} needs either command or url",
+                    u.name
+                )));
+            }
         }
     }
 
@@ -584,6 +639,32 @@ tools = ["db.query", "mail.send", "web.fetch"]
     fn unknown_limit_kind_is_an_error() {
         let bad = SAMPLE.replace("to_domains", "to_whatever");
         assert!(Policy::parse(&bad, PathBuf::new()).is_err());
+    }
+
+    #[test]
+    fn url_upstreams_are_validated() {
+        let base = "[[upstream]]\nname = \"r\"\n";
+        let ok = format!(
+            "{base}url = \"https://mcp.example.com/mcp\"\nbearer_token_env = \"R_TOKEN\"\n"
+        );
+        let p = Policy::parse(&ok, PathBuf::new()).unwrap();
+        assert_eq!(
+            p.upstreams[0].url.as_deref(),
+            Some("https://mcp.example.com/mcp")
+        );
+        for bad in [
+            format!("{base}url = \"ftp://x\"\n"),
+            format!("{base}url = \"http://x\"\ncommand = [\"y\"]\n"),
+            base.to_string(),
+            format!("{base}command = [\"y\"]\nbearer_token_env = \"T\"\n"),
+            format!("{base}url = \"http://x\"\nenv = {{ A = \"b\" }}\n"),
+            format!("{base}command = []\n"),
+        ] {
+            assert!(
+                Policy::parse(&bad, PathBuf::new()).is_err(),
+                "should reject: {bad}"
+            );
+        }
     }
 
     #[test]

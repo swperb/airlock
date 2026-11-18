@@ -17,6 +17,9 @@ path = "src/main.rs"
 airlock-core = { path = "../airlock-core" }
 serde_json.workspace = true
 clap.workspace = true
+ureq.workspace = true
+tiny_http.workspace = true
+getrandom.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
