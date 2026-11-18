@@ -7,8 +7,8 @@ that read a prompt injection and is doing whatever an attacker wrote) cannot
 cause serious damage, because the damage-causing actions are refused at a
 chokepoint the agent does not control.
 
-This is the first version. It is a working MCP stdio gateway with a policy
-engine, approvals, a tamper-evident audit log and a kill switch, plus a demo
+This is an early version. It is a working MCP gateway, over stdio or
+streamable HTTP, with a policy engine, approvals, a tamper-evident audit log and a kill switch, plus a demo
 that shows a prompt-injection attack succeeding without the gateway and being
 blocked with it.
 
@@ -45,15 +45,15 @@ field in its request that says `"approved": true`) changes a decision.
   is not a sandbox for a malicious server or a malicious operator.
 - **Not yet addressed** (documented extension points, see below): a hosted
   multi-tenant service, OAuth token exchange / a credential broker, network
-  egress control, an endpoint agent for desktop/computer-use, and the HTTP
-  transport.
+  egress control, and an endpoint agent for desktop/computer-use.
 
 ## Layout
 
 ```
 crates/airlock-core   the deterministic engine: policy, classes, provenance,
                       budgets, approvals, audit chain, kill switch, pipeline
-crates/airlock        the binary: MCP stdio transport, upstream clients, CLI
+crates/airlock        the binary: MCP stdio and streamable HTTP transports,
+                      upstream clients (stdio and HTTP), CLI
 demo/                 fake MCP servers, a scripted hijacked agent, run.sh
 ```
 
@@ -79,6 +79,12 @@ name = "web"
 command = ["fetch-mcp"]
 provenance = "untrusted"     # everything this server returns is labelled untrusted
 
+[[upstream]]
+name = "tickets"
+url = "https://mcp.internal.example/mcp"   # a remote streamable HTTP MCP server
+bearer_token_env = "TICKETS_MCP_TOKEN"     # token read from the gateway's environment
+provenance = "untrusted"
+
 [[tool]]
 name  = "db.query"
 class = "read"               # read | reversible_write | destructive | irreversible_external
@@ -102,6 +108,11 @@ tools   = ["db.query", "db.execute", "mail.send", "web.fetch"]
 "mail.send" = { per_hour = 20 }
 "db.query"  = { per_hour = 500 }
 ```
+
+Each upstream sets exactly one of `command` (a local server over stdio; pass
+its credentials with `env`) or `url` (a remote server over streamable HTTP;
+name the environment variable holding its bearer token with
+`bearer_token_env`, so the token never sits in the policy file).
 
 Rules: a tool not listed in `[[tool]]` is denied; a tool not in the active
 grant is denied; unknown fields are an error (no silent defaults); every regex
@@ -200,11 +211,49 @@ the state directory sees it at once. You can trip it by hand with
 airlock run --policy policy.toml --task support-triage
 ```
 
-airlock speaks MCP (JSON-RPC 2.0) over stdio: it is an MCP server to the agent
-and an MCP client to each upstream server listed in the policy. Point your
-agent's MCP client at `airlock run ...` instead of at the servers directly. The
-agent sees each tool namespaced as `upstream.tool`, with its class noted in the
-description.
+airlock is an MCP server to the agent and an MCP client to each upstream
+server listed in the policy. The agent sees each tool namespaced as
+`upstream.tool`, with its class noted in the description. It can face the agent
+in two ways.
+
+**stdio** (the agent launches airlock as a local MCP server): point the agent's
+MCP client at `airlock run ...` instead of at the servers directly.
+
+**Streamable HTTP** (airlock runs as a network service, so rolling it out is a
+config or DNS change rather than an install on every machine):
+
+```bash
+export AIRLOCK_HTTP_TOKEN="$(openssl rand -hex 32)"
+airlock serve --policy policy.toml --task support-triage --listen 127.0.0.1:8787
+```
+
+Agents connect to `http://127.0.0.1:8787/mcp` with
+`Authorization: Bearer $AIRLOCK_HTTP_TOKEN`. The endpoint follows the MCP
+streamable HTTP transport: `POST` for messages (the first must be `initialize`,
+whose response carries an `Mcp-Session-Id` header), `DELETE` to end a session.
+airlock never sends server-initiated messages, so `GET` returns 405.
+
+How the HTTP listener is hardened:
+
+- **Authentication.** The bearer token comes from `AIRLOCK_HTTP_TOKEN`, never
+  the command line, and is compared in constant time. airlock refuses to listen
+  on a non-loopback address without one.
+- **DNS rebinding.** Any request carrying an `Origin` header is refused unless
+  that origin is allowed with `--allow-origin`.
+- **Limits.** Request bodies are capped (4 MiB), open sessions are capped
+  (`--max-sessions`, default 256) and idle sessions expire
+  (`--idle-timeout-secs`, default one hour).
+- **Shared state.** Each MCP session gets its own gateway and upstream
+  connections, but the record of untrusted output and the budgets are shared by
+  every session of the task. A hijacked agent cannot reset its budget, or read
+  untrusted content in one session and act on it in another, by opening a new
+  session.
+- **No TLS termination.** Bind to loopback, or put a TLS-terminating reverse
+  proxy in front, for anything that crosses a network.
+
+Approvals are bound to the MCP session that asked, so the approved retry must
+arrive on the same session. Budgets and taint live in the gateway process: a
+restart resets them, so run the gateway as a service the agent cannot restart.
 
 ## The demo
 
@@ -242,7 +291,12 @@ infrastructure in this repository, and none is needed.
   two-person rule, refund-laundering via an untrusted ticket) is expressed as
   **policy fixtures**: the cases check that the policy can state the rule and
   the engine enforces it the same way every time.
-- `demo/tests/demo.rs`: runs the demo both ways and asserts the outcomes.
+- `crates/airlock/tests/http.rs`: the streamable HTTP listener (session
+  lifecycle, bearer token, Origin check, body and session limits, budgets and
+  taint shared across sessions) and the HTTP upstream client against a mock
+  server that answers over server-sent events.
+- `demo/tests/demo.rs`: runs the demo without the gateway, through it over
+  stdio, and through it over HTTP, and asserts the outcomes.
 
 ```bash
 cargo test --workspace
@@ -259,9 +313,11 @@ Left as clear extension points, intentionally unbuilt in this version:
 - **Network egress control**: confining agent runtimes to the hosts a task
   needs.
 - **Endpoint enforcer**: the same policies on a desktop/computer-use agent.
-- **Streamable HTTP transport**: only stdio is implemented. The gateway and
-  upstream client are written against small transport-agnostic seams
-  (`stdio::serve`, the `Upstreams` trait) so HTTP slots in beside them.
+- **TLS and server-initiated messages on the HTTP transport**: terminate TLS
+  at a reverse proxy; requests an upstream sends back to the client (sampling,
+  elicitation) are not relayed.
+- **Persistent budgets**: budgets and the untrusted-output record are kept in
+  memory per gateway process.
 - **Hosted service, web UI, multi-tenant management**, and **customer-held
   signing keys** for policies.
 
