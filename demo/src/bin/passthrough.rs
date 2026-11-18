@@ -11,10 +11,16 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 
 fn main() {
+    // The demo servers are built alongside this binary (target/debug, or
+    // demo/.run/bin when run.sh copies them), so find them next to it rather
+    // than relative to the current directory.
+    let exe = std::env::current_exe().expect("locate passthrough binary");
+    let dir = exe.parent().expect("binary has a parent directory");
+    let server = |name: &str| vec![dir.join(name).to_string_lossy().into_owned()];
     let upstreams = [
-        ("db", vec!["demo/.run/bin/db-server".to_string()]),
-        ("mail", vec!["demo/.run/bin/mail-server".to_string()]),
-        ("web", vec!["demo/.run/bin/web-server".to_string()]),
+        ("db", server("db-server")),
+        ("mail", server("mail-server")),
+        ("web", server("web-server")),
     ];
     let mut clients: BTreeMap<&str, Client> = BTreeMap::new();
     for (name, cmd) in &upstreams {
