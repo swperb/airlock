@@ -106,7 +106,7 @@ fn start(tweak: impl FnOnce(&mut HttpConfig)) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let policy = Policy::parse(POLICY, dir.path().to_path_buf()).unwrap();
     let mock = Mock::default();
-    let state = TaskState::shared(&policy);
+    let state = TaskState::shared(&policy, "t");
     let m = mock.clone();
     let factory = move |sid: &str| {
         Gateway::with_shared_state(
