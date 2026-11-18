@@ -276,4 +276,12 @@ Left as clear extension points, intentionally unbuilt in this version:
 
 ## Licence
 
-Apache-2.0.
+Apache-2.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE)).
+
+airlock is **open core**. The engine, gateway, CLI and demo in this repository
+are Apache-2.0: free to use, audit, self-host, fork and improve. A firewall is
+only trustworthy if its enforcement can be inspected, so the part that makes the
+safety decisions is open on purpose. Commercial components built on top — a
+hosted multi-tenant control plane, managed and signed policies, SSO/RBAC, SIEM
+integrations and support — are not part of this repository and are licensed
+separately.

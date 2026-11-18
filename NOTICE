@@ -1,0 +1,9 @@
+airlock
+Copyright 2026 Stephen Proctor
+
+This product includes software developed as an open-core project:
+the engine, gateway, CLI and demo in this repository are licensed under
+the Apache License, Version 2.0 (see LICENSE). Commercial components
+built on top of it (for example a hosted multi-tenant control plane,
+managed and signed policies, and enterprise support) are not part of
+this repository and are licensed separately.
