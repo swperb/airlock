@@ -39,9 +39,10 @@ field in its request that says `"approved": true`) changes a decision.
   disallowed recipients, blocks laundering untrusted data into an outbound
   action without a person, caps volume with budgets, and freezes everything on
   command.
-- **Assumed trustworthy.** The policy file, the upstream MCP servers
-  themselves, and the out-of-band approval channel (the operator's terminal /
-  the webhook target). airlock mediates the *agent's* access to the servers; it
+- **Assumed trustworthy.** The policy file (or, with signed policies, the
+  holder of the signing key and the gateway's state directory), the upstream
+  MCP servers themselves, and the out-of-band approval channel (the operator's
+  terminal / the webhook target). airlock mediates the *agent's* access to the servers; it
   is not a sandbox for a malicious server or a malicious operator.
 - **Not yet addressed** (documented extension points, see below): a hosted
   multi-tenant service, OAuth token exchange / a credential broker, network
@@ -117,7 +118,8 @@ name the environment variable holding its bearer token with
 Rules: a tool not listed in `[[tool]]` is denied; a tool not in the active
 grant is denied; unknown fields are an error (no silent defaults); every regex
 must compile or the policy fails to load. Check a policy with
-`airlock policy check --policy policy.toml`.
+`airlock policy check --policy policy.toml` (add `--trusted-keys` to check
+its signature too; see [Signed policies](#signed-policies-customer-held-keys)).
 
 ### Argument limits
 
@@ -192,6 +194,56 @@ Editing, deleting or reordering any line breaks the chain.
 airlock audit tail   --state-dir .airlock --n 20
 airlock audit verify --state-dir .airlock   # reports the first broken line, if any
 ```
+
+## Signed policies (customer-held keys)
+
+The brief's rule is to assume the vendor's own servers are compromised. A
+policy is only as trustworthy as whoever can write it, so airlock can refuse to
+run any policy that is not signed by a key the customer holds. Whoever ships or
+edits policy files (a vendor console, a config repository, an attacker with
+write access) then cannot loosen enforcement without that private key.
+
+```bash
+# Once, on a machine that is not the gateway: create the key pair.
+airlock keygen --out ops --comment "security team"      # ops.key (0600) + ops.pub
+
+# For each policy change: review it, then sign it.
+airlock policy sign --policy policy.toml --key ops.key  # writes policy.toml.sig
+
+# On the gateway: trust the public key. Unsigned or altered policies now fail to load.
+airlock run   --policy policy.toml --task support-triage --trusted-keys ops.pub
+airlock serve --policy policy.toml --task support-triage --trusted-keys ops.pub
+airlock policy verify --policy policy.toml --trusted-keys ops.pub
+```
+
+`--trusted-keys` can also be set with `AIRLOCK_TRUSTED_KEYS`. A trusted-keys
+file holds one public key per line, so you can rotate keys by trusting the old
+and new key together for a while. An empty file is an error, so truncating it
+cannot silently turn checking off.
+
+How it works:
+
+- **What is signed.** Ed25519 over a domain-separated message binding the
+  SHA-256 of the policy's exact bytes to a serial number. Change one byte of
+  the policy, or the serial, and the signature no longer verifies.
+- **Checked once, used as checked.** The gateway reads the policy once,
+  verifies those bytes and parses the same bytes, so the file cannot be swapped
+  between the check and the use.
+- **Rollback protection.** Each signature carries a serial, which
+  `airlock policy sign` increments. The gateway records the highest serial it
+  has accepted in its state directory and refuses older ones, so an attacker
+  cannot restore a previously signed but looser policy. Keep the state
+  directory writable only by the gateway.
+- **Audit.** Every gateway start writes a `policy_loaded` entry with the
+  policy's SHA-256 and, when signed, the key id and serial, so each session can
+  be traced to the exact policy it ran under. Without trusted keys the gateway
+  says so on startup and records `"signed": false`.
+- **Signing checks the policy first.** `airlock policy sign` refuses to sign a
+  policy that does not load.
+
+Keep the private key offline (it never needs to be on the gateway). Only the
+policy file is covered: the gateway's command line, environment and state
+directory are part of the deployment the customer controls.
 
 ## Kill switch
 
@@ -291,6 +343,8 @@ infrastructure in this repository, and none is needed.
   two-person rule, refund-laundering via an untrusted ticket) is expressed as
   **policy fixtures**: the cases check that the policy can state the rule and
   the engine enforces it the same way every time.
+- `crates/airlock/tests/signing_cli.rs`: key generation, signing, verification,
+  and the gateway refusing unsigned, altered, untrusted or replayed policies.
 - `crates/airlock/tests/http.rs`: the streamable HTTP listener (session
   lifecycle, bearer token, Origin check, body and session limits, budgets and
   taint shared across sessions) and the HTTP upstream client against a mock
@@ -318,8 +372,8 @@ Left as clear extension points, intentionally unbuilt in this version:
   elicitation) are not relayed.
 - **Persistent budgets**: budgets and the untrusted-output record are kept in
   memory per gateway process.
-- **Hosted service, web UI, multi-tenant management**, and **customer-held
-  signing keys** for policies.
+- **Hosted service, web UI, multi-tenant management.**
+- **Threshold signing**: a policy needs one trusted key's signature, not k of n.
 
 ## Design notes
 

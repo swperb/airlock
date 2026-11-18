@@ -6,6 +6,7 @@ use std::process::ExitCode;
 
 use airlock_core::approvals::{ApprovalStore, Pending, Status};
 use airlock_core::audit::{self, Verification};
+use airlock_core::signing::{self, PolicySignature, PrivateKey, Serial, TrustedKeys};
 use airlock_core::util::now_unix;
 use airlock_core::{freeze, Policy};
 use clap::{Args, Parser, Subcommand};
@@ -27,7 +28,16 @@ enum Cmd {
     Run(RunArgs),
     /// Serve the gateway for one task over MCP streamable HTTP.
     Serve(ServeArgs),
-    /// Check that a policy file is valid.
+    /// Generate an Ed25519 key pair for signing policies.
+    Keygen {
+        /// Path prefix: writes <OUT>.key (private, mode 0600) and <OUT>.pub.
+        #[arg(long)]
+        out: PathBuf,
+        /// Comment stored with the public key, e.g. who holds it.
+        #[arg(long, default_value = "")]
+        comment: String,
+    },
+    /// Check, sign or verify a policy file.
     Policy {
         #[command(subcommand)]
         what: PolicyCmd,
@@ -49,6 +59,23 @@ enum Cmd {
     },
 }
 
+/// Policy signature enforcement. When a trusted-keys file is given, the
+/// policy must carry a valid signature (`<policy>.sig`) from one of its keys.
+#[derive(Args, Clone)]
+struct TrustArgs {
+    #[arg(long, env = "AIRLOCK_TRUSTED_KEYS")]
+    trusted_keys: Option<PathBuf>,
+}
+
+impl TrustArgs {
+    fn load(&self) -> Result<Option<TrustedKeys>, Box<dyn std::error::Error>> {
+        Ok(match &self.trusted_keys {
+            Some(p) => Some(TrustedKeys::load(p)?),
+            None => None,
+        })
+    }
+}
+
 #[derive(Args)]
 struct RunArgs {
     #[arg(long)]
@@ -59,6 +86,8 @@ struct RunArgs {
     /// Session id (defaults to a timestamp-based id).
     #[arg(long)]
     session: Option<String>,
+    #[command(flatten)]
+    trust: TrustArgs,
 }
 
 #[derive(Args)]
@@ -82,6 +111,8 @@ struct ServeArgs {
     /// End sessions idle for this many seconds.
     #[arg(long, default_value_t = 3600)]
     idle_timeout_secs: u64,
+    #[command(flatten)]
+    trust: TrustArgs,
 }
 
 #[derive(Subcommand)]
@@ -90,6 +121,27 @@ enum PolicyCmd {
     Check {
         #[arg(long)]
         policy: PathBuf,
+        #[command(flatten)]
+        trust: TrustArgs,
+    },
+    /// Sign a policy, writing <POLICY>.sig.
+    Sign {
+        #[arg(long)]
+        policy: PathBuf,
+        /// Private key file from `airlock keygen`.
+        #[arg(long)]
+        key: PathBuf,
+        /// Serial number; defaults to one more than the existing signature's.
+        /// Gateways refuse a serial lower than one they have accepted.
+        #[arg(long)]
+        serial: Option<u64>,
+    },
+    /// Verify a policy's signature against trusted keys.
+    Verify {
+        #[arg(long)]
+        policy: PathBuf,
+        #[arg(long, env = "AIRLOCK_TRUSTED_KEYS")]
+        trusted_keys: PathBuf,
     },
 }
 
@@ -151,9 +203,19 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     match cli.cmd {
         Cmd::Run(a) => cmd_run(a),
         Cmd::Serve(a) => cmd_serve(a),
-        Cmd::Policy {
-            what: PolicyCmd::Check { policy },
-        } => cmd_policy_check(&policy),
+        Cmd::Keygen { out, comment } => cmd_keygen(&out, &comment),
+        Cmd::Policy { what } => match what {
+            PolicyCmd::Check { policy, trust } => cmd_policy_check(&policy, &trust),
+            PolicyCmd::Sign {
+                policy,
+                key,
+                serial,
+            } => cmd_policy_sign(&policy, &key, serial),
+            PolicyCmd::Verify {
+                policy,
+                trusted_keys,
+            } => cmd_policy_verify(&policy, &trusted_keys),
+        },
         Cmd::Approve(a) => cmd_decide(a, true),
         Cmd::Reject(a) => cmd_decide(a, false),
         Cmd::Pending(s) => cmd_pending(&s),
@@ -186,7 +248,8 @@ impl StateArgs {
 }
 
 fn cmd_run(a: RunArgs) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    airlock::run_gateway(&a.policy, &a.task, a.session)?;
+    let trusted = a.trust.load()?;
+    airlock::run_gateway(&a.policy, &a.task, a.session, trusted.as_ref())?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -206,7 +269,8 @@ fn cmd_serve(a: ServeArgs) -> Result<ExitCode, Box<dyn std::error::Error>> {
     } else {
         "no token (loopback only)"
     };
-    let server = airlock::serve_http(&a.policy, &a.task, cfg)?;
+    let trusted = a.trust.load()?;
+    let server = airlock::serve_http(&a.policy, &a.task, cfg, trusted.as_ref())?;
     eprintln!(
         "airlock: serving task {:?} on {} ({auth})",
         a.task,
@@ -216,8 +280,13 @@ fn cmd_serve(a: ServeArgs) -> Result<ExitCode, Box<dyn std::error::Error>> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn cmd_policy_check(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let p = Policy::load(path)?;
+fn cmd_policy_check(
+    path: &Path,
+    trust: &TrustArgs,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let trusted = trust.load()?;
+    let loaded = signing::load_policy(path, trusted.as_ref(), Serial::CheckOnly)?;
+    let p = loaded.policy;
     println!(
         "policy OK: {} upstream(s), {} tool(s), {} grant(s)",
         p.upstreams.len(),
@@ -233,6 +302,130 @@ fn cmd_policy_check(path: &Path) -> Result<ExitCode, Box<dyn std::error::Error>>
     }
     println!("  state dir: {}", p.state_dir().display());
     println!("  audit log: {}", p.audit_path().display());
+    println!("  sha256:    {}", loaded.sha256);
+    match loaded.verified {
+        Some(v) => println!(
+            "  signature: valid, key {} ({}), serial {}",
+            v.key_id, v.key_comment, v.serial
+        ),
+        None => println!("  signature: not checked (no trusted keys given)"),
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn write_new_file(path: &Path, contents: &str, private: bool) -> std::io::Result<()> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    if private {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    #[cfg(not(unix))]
+    let _ = private;
+    let mut f = opts.open(path)?;
+    f.write_all(contents.as_bytes())?;
+    f.sync_all()
+}
+
+fn with_suffix(prefix: &Path, suffix: &str) -> PathBuf {
+    let mut s = prefix.as_os_str().to_owned();
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
+fn cmd_keygen(out: &Path, comment: &str) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let (key_path, pub_path) = (with_suffix(out, ".key"), with_suffix(out, ".pub"));
+    for p in [&key_path, &pub_path] {
+        if p.exists() {
+            return Err(format!(
+                "{} already exists; refusing to overwrite a key",
+                p.display()
+            )
+            .into());
+        }
+    }
+    let mut seed = [0u8; 32];
+    getrandom::fill(&mut seed).map_err(|e| format!("no system randomness: {e}"))?;
+    let key = PrivateKey::from_seed(seed);
+    seed.fill(0);
+    write_new_file(&key_path, &key.to_file_text(), true)?;
+    write_new_file(
+        &pub_path,
+        &signing::public_key_line(&key.public(), comment),
+        false,
+    )?;
+    println!(
+        "private key: {}  (keep it offline; anyone holding it can sign policies)",
+        key_path.display()
+    );
+    println!(
+        "public key:  {}  (key id {})",
+        pub_path.display(),
+        signing::key_id(&key.public())
+    );
+    println!("Give gateways the public key with --trusted-keys or AIRLOCK_TRUSTED_KEYS.");
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_policy_sign(
+    policy: &Path,
+    key: &Path,
+    serial: Option<u64>,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let bytes = std::fs::read(policy).map_err(|e| format!("reading {}: {e}", policy.display()))?;
+    // Never sign a policy the gateway would reject.
+    let text = String::from_utf8(bytes.clone()).map_err(|_| "policy file is not UTF-8")?;
+    let base = policy.parent().map(Path::to_path_buf).unwrap_or_default();
+    Policy::parse(&text, base)?;
+    let sig_path = signing::signature_path(policy);
+    let previous = match std::fs::read_to_string(&sig_path) {
+        Ok(t) => Some(PolicySignature::parse(&t)?.serial),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.into()),
+    };
+    let serial = match (serial, previous) {
+        (Some(s), Some(prev)) if s <= prev => {
+            return Err(format!(
+                "serial {s} is not higher than the existing signature's serial {prev}"
+            )
+            .into())
+        }
+        (Some(s), _) => s,
+        (None, Some(prev)) => prev.checked_add(1).ok_or("serial overflow")?,
+        (None, None) => 1,
+    };
+    let key = PrivateKey::load(key)?;
+    let sig = signing::sign(&bytes, serial, &key);
+    let tmp = with_suffix(&sig_path, ".tmp");
+    std::fs::write(&tmp, sig.to_file_text())?;
+    std::fs::rename(&tmp, &sig_path)?;
+    println!(
+        "signed {} with key {} at serial {serial}: {}",
+        policy.display(),
+        sig.key_id,
+        sig_path.display()
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_policy_verify(
+    policy: &Path,
+    trusted_keys: &Path,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let trusted = TrustedKeys::load(trusted_keys)?;
+    let loaded = signing::load_policy(policy, Some(&trusted), Serial::CheckOnly)?;
+    let v = loaded
+        .verified
+        .expect("verified when trusted keys are given");
+    println!(
+        "signature OK: {} is signed by key {} ({}) at serial {}",
+        policy.display(),
+        v.key_id,
+        v.key_comment,
+        v.serial
+    );
+    println!("sha256: {}", loaded.sha256);
     Ok(ExitCode::SUCCESS)
 }
 

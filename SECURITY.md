@@ -29,6 +29,9 @@ In scope, for example:
   catching it, in a way the README does not already describe as a limitation.
 - Breaking the audit chain without `airlock audit verify` noticing.
 - Upstream credentials leaking to the agent.
+- A gateway with trusted keys configured loading a policy that is unsigned,
+  altered after signing, signed by an untrusted key, or older than one it
+  already accepted.
 
 Out of scope: limitations the README lists under "What is NOT protected yet",
 and attacks that need control of the policy file, the upstream servers or the

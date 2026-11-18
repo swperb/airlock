@@ -15,7 +15,7 @@ toml = "0.8"
 sha2 = "0.10"
 hex = "0.4"
 regex = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 time = { version = "0.3", features = ["formatting", "parsing"] }
 proptest = "1"
 tempfile = "3"
@@ -23,6 +23,7 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 tiny_http = "0.12"
 getrandom = "0.3"
+ed25519-dalek = "2"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
