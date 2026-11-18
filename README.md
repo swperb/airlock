@@ -26,8 +26,8 @@ is safe. Every decision comes from three things only:
 - the **provenance** of the arguments (whether a value was derived from
   untrusted content earlier in the session).
 
-Nothing the agent says about itself — its claimed task, its stated reason, a
-field in its request that says `"approved": true` — changes a decision.
+Nothing the agent says about itself (its claimed task, its stated reason, a
+field in its request that says `"approved": true`) changes a decision.
 
 ## Threat model
 
@@ -112,13 +112,13 @@ must compile or the policy fails to load. Check a policy with
 
 Each key under `[grant.limits]."<tool>"` names an argument and a constraint:
 
-- `<arg>_domains = [...]` — every value must be a single bare address
+- `<arg>_domains = [...]`: every value must be a single bare address
   `local@domain` whose domain is in, or a subdomain of, the list. Addresses
   with display names, commas or angle brackets are rejected (so
   `a@ok.com, b@evil.com` cannot slip through).
-- `<arg>_in = [...]` — value (or every array element) must be one of these.
-- `<arg>_matches = "regex"` — value must fully match (the regex is anchored).
-- `<arg>_max_len = N` — value must be at most N characters.
+- `<arg>_in = [...]`: value (or every array element) must be one of these.
+- `<arg>_matches = "regex"`: value must fully match (the regex is anchored).
+- `<arg>_max_len = N`: value must be at most N characters.
 
 A constrained argument that is missing is refused, not waved through.
 
@@ -144,7 +144,7 @@ For every `tools/call`, in order:
    upstream's provenance (and recorded, if untrusted, for step 4).
 
 Budgets are charged once per logical action (each read/reversible call; the
-first attempt of a destructive/external call — not the approved retry). When a
+first attempt of a destructive/external call, not the approved retry). When a
 tool exceeds its hourly budget the circuit breaker trips and that tool stays
 refused for the rest of the session.
 
@@ -165,8 +165,8 @@ airlock approve   ap-abc123 --by alice --state-dir .airlock
 airlock reject    ap-abc123 --by alice --state-dir .airlock
 ```
 
-A property test throws arbitrary agent messages — including ones crafted to
-look like approvals — at a gateway holding a pending destructive call and
+A property test throws arbitrary agent messages, including ones crafted to
+look like approvals, at a gateway holding a pending destructive call and
 asserts it is never forwarded. The only path to forwarding is a real
 `airlock approve`.
 
@@ -232,17 +232,17 @@ the harness drives the engine against mock upstreams with hostile inputs and
 asserts the verdict. There is deliberately no working exploit against any real
 infrastructure in this repository, and none is needed.
 
-- `crates/airlock-core/tests/pipeline.rs` — every pipeline branch end to end
+- `crates/airlock-core/tests/pipeline.rs`: every pipeline branch end to end
   (deny patterns, limits, holds, approvals, two-person, freeze, budget/breaker,
   expiry, taint-forced holds, audit).
-- `crates/airlock-core/tests/self_approval.rs` — the property that an agent
+- `crates/airlock-core/tests/self_approval.rs`: the property that an agent
   cannot approve its own action.
-- `crates/airlock-core/tests/scenarios.rs` — an adversarial scenario corpus.
+- `crates/airlock-core/tests/scenarios.rs`: an adversarial scenario corpus.
   Sector realism (healthcare clinical-lookup, production change control with a
   two-person rule, refund-laundering via an untrusted ticket) is expressed as
   **policy fixtures**: the cases check that the policy can state the rule and
   the engine enforces it the same way every time.
-- `demo/tests/demo.rs` — runs the demo both ways and asserts the outcomes.
+- `demo/tests/demo.rs`: runs the demo both ways and asserts the outcomes.
 
 ```bash
 cargo test --workspace
@@ -256,10 +256,10 @@ Left as clear extension points, intentionally unbuilt in this version:
 - **Credential broker** (OAuth 2.0 token exchange, RFC 8693). Today upstream
   credentials sit in the policy's per-upstream `env` and are never handed to
   the agent, but there is no short-lived-token exchange yet.
-- **Network egress control** — confining agent runtimes to the hosts a task
+- **Network egress control**: confining agent runtimes to the hosts a task
   needs.
-- **Endpoint enforcer** — the same policies on a desktop/computer-use agent.
-- **Streamable HTTP transport** — only stdio is implemented. The gateway and
+- **Endpoint enforcer**: the same policies on a desktop/computer-use agent.
+- **Streamable HTTP transport**: only stdio is implemented. The gateway and
   upstream client are written against small transport-agnostic seams
   (`stdio::serve`, the `Upstreams` trait) so HTTP slots in beside them.
 - **Hosted service, web UI, multi-tenant management**, and **customer-held
@@ -274,6 +274,13 @@ Left as clear extension points, intentionally unbuilt in this version:
 - The grant, dry-run and audit ideas are adapted from the capability model in a
   separate OS project, but airlock is standalone and depends on none of it.
 
+## Contributing and security
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
+ground rules, how to run the checks, and how to sign off commits (the project
+uses the Developer Certificate of Origin). Report vulnerabilities privately as
+described in [SECURITY.md](SECURITY.md), never in a public issue.
+
 ## Licence
 
 Apache-2.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE)).
@@ -281,7 +288,7 @@ Apache-2.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE)).
 airlock is **open core**. The engine, gateway, CLI and demo in this repository
 are Apache-2.0: free to use, audit, self-host, fork and improve. A firewall is
 only trustworthy if its enforcement can be inspected, so the part that makes the
-safety decisions is open on purpose. Commercial components built on top — a
+safety decisions is open on purpose. Commercial components built on top (a
 hosted multi-tenant control plane, managed and signed policies, SSO/RBAC, SIEM
-integrations and support — are not part of this repository and are licensed
+integrations and support) are not part of this repository and are licensed
 separately.
